@@ -5,7 +5,7 @@ QFpy is a Python package implementing common numerical tools used in quantitativ
 Clone this repository to your local machine:
 
 ```bash
-    git clone https://github.com/yourusername/quant-finance-lib.git
+    git clone https://github.com/carlomusolino/QFpy.git
 ```
 
 And locally install it with `pip`
