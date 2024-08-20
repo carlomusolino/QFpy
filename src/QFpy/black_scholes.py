@@ -408,23 +408,33 @@ class BlackScholesMCSolver:
         elif not is_scalar(t) and is_scalar(S):
             if t.ndim > 1:
                 raise ValueError("If S is scalar t must be rank 1.")
-            out = np.array([len(t)])
+            mean   = np.zeros(len(t))
+            stddev = np.zeros(len(t))
             for i,tt in enumerate(t):
-                out[i] = self.__get_value(tt,S,dt,ntrials)
-            return out 
+                mu,sigma  = self.__get_value(tt,S,dt,ntrials)
+                mean[i]   = mu 
+                stddev[i] = sigma
+            return mean,stddev  
+            
         elif not is_scalar(S) and is_scalar(t):
             if S.ndim > 1:
                 raise ValueError("If t is scalar S must be rank 1.")
-            out = np.array([len(S)])
+            mean   = np.zeros(len(S))
+            stddev = np.zeros(len(S))
             for i,s in enumerate(S):
-                out[i] = self.__get_value(t,s,dt,ntrials)
-            return out    
+                mu,sigma = self.__get_value(t,s,dt,ntrials)
+                mean[i] = mu 
+                stddev[i] = sigma
+            return mean,stddev    
         else:
             if ( not S.ndim == 2 ) or ( not t.ndim == 2):
                 raise ValueError("If both S and t are arrays they must be a meshgrid.")
             rows, cols = S.shape
-            out = np.zeors_like(S)
+            mean   = np.zeros_like(S,dtype=float)
+            stddev = np.zeros_like(S,dtype=float)
             for i in range(rows):
                 for j in range(cols):
-                    out[i,j] = self.__get_value(t[i,j],S[i,j],dt,ntrials)
-            return out 
+                    mu,sigma = self.__get_value(t[i,j],S[i,j],dt,ntrials)
+                    mean[i,j] = mu 
+                    stddev[i,j] = sigma
+            return mean,stddev
