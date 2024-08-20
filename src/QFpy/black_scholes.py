@@ -2,6 +2,10 @@ from scipy.interpolate import RegularGridInterpolator
 import numpy as np
 from scipy.sparse import diags
 from typing import Callable
+from scipy.integrate import cumtrapz 
+
+from QFpy.MC_utils import LogNormalStep
+from QFpy.typing_utils import is_scalar 
 
 def __divides_exactly(a, b, tol=1e-9):
     if abs(a) < tol or abs(b) < tol:
@@ -299,3 +303,128 @@ class BlackScholesFDSolver:
               f"   asset price axis spacing        = {self.__h}\n"
               
 
+def NoPathDependence():
+    pass 
+
+class BlackScholesMCSolver:
+    
+    def __init__(self,
+                 volatility: Callable,
+                 interest_rate: Callable,
+                 payoff: Callable,
+                 expiry: float,
+                 n_underlying: int = 1,
+                 rho: np.ndarray = np.array([1]),
+                 args = []):
+        self.__vol = volatility 
+        self.__r   = interest_rate 
+        
+        self.__payoff = payoff 
+
+        self.__n_underlying = n_underlying 
+        
+        self.__T = expiry 
+        
+        self.__args = args 
+        
+    def __shoot_single_asset(self, t, T, dt, S0):
+        N = int((T-t)/dt)
+        S = [S0]
+        _t = t 
+        _rates = [self.__r(t)]
+        _vols = [self.__vol(S0,t)]
+        _times = [t]
+        for i in range(1,N):
+            _t += dt 
+            vol = self.__vol(S[i-1], _t)
+            r   = self.__r(_t)
+            S.append(LogNormalStep(S[i-1],dt,vol,r))
+            _rates.append(r)
+            _times.append(_t)
+            _vols.append(vol)
+        return (S,_rates,_vols,_times)
+    
+    def __shoot_multiple_assets(self, t, T, dt, S0):
+        N = int((T-t)/dt)
+        S = [S0]
+        _t = t 
+        _rates = [self.__r(t)]
+        _vols = [self.__vol(S0,t)]
+        _times = [t]
+        rng = np.random.default_rng()
+        for i in range(1,N):
+            _t += dt 
+            vol = self.__vol(S[i-1], _t)
+            r   = self.__r(_t)
+            dX = rng.multivariate_normal(0, self.__rho, size=self.__n_underlying)
+            S.append(S[i-1] * np.exp( (r - 0.5*vol**2) * dt + vol * dX * np.sqrt(dt) ) )
+            _rates.append(r)
+            _times.append(_t)
+            _vols.append(vol)
+        return (S,_rates,_vols,_times)
+
+    def __discount(self, S, r, t):
+        return S * np.exp(-cumtrapz(r,t))
+    
+    def __get_value_single_asset(self, t: float, S: float, dt: float, ntrials: int):
+        Vlist = [] 
+        for i in range(ntrials):
+            Shist, rhist, volhist, times = self.__shoot_single_asset(t,self.__T,dt,S)
+            Vlist.append( self.__discount(self.__payoff(Shist,
+                                                  rhist,
+                                                  volhist,
+                                                  times,
+                                                  *self.__args), 
+                                    rhist, 
+                                    times) )
+        return (np.mean(np.array(Vlist)), np.std(np.array(Vlist),ddof=1) )
+
+    def __get_value_multiple_assets(self,
+                                    t: float,
+                                    S: np.ndarray,
+                                    dt: float,
+                                    ntrials: int):
+        Vlist = []
+        for i in range(ntrials):
+            Shist, rhist, volhist, times = self.__shoot_multiple_assets(t,self.__T,dt,S)
+            Vlist.append(self.__payoff(Shist, 
+                                       rhist, 
+                                       volhist, 
+                                       times, 
+                                       *self.__args), 
+                        rhist, 
+                        times)
+        return (np.mean(np.array(Vlist)), np.std(np.array(Vlist),ddof=1) ) 
+    
+    def __get_value(self,t,S,dt,ntrials):
+        if self.__n_underlying == 1:
+            return self.__get_value_single_asset(t,S,dt,ntrials)
+        else:
+            return self.__get_value_multiple_assets(t,S,ntrials)
+    
+    def get_value(self, t: np.ndarray, S: np.ndarray, dt: float, ntrials: int ): 
+        if is_scalar(t) and is_scalar(S):
+            return self.__get_value(t,S,dt,ntrials)
+        elif not is_scalar(t) and is_scalar(S):
+            if t.ndim > 1:
+                raise ValueError("If S is scalar t must be rank 1.")
+            out = np.array([len(t)])
+            for i,tt in enumerate(t):
+                out[i] = self.__get_value(tt,S,dt,ntrials)
+            return out 
+        elif not is_scalar(S) and is_scalar(t):
+            if S.ndim > 1:
+                raise ValueError("If t is scalar S must be rank 1.")
+            out = np.array([len(S)])
+            for i,s in enumerate(S):
+                out[i] = self.__get_value(t,s,dt,ntrials)
+            return out    
+        else:
+            if ( not S.ndim == 2 ) or ( not t.ndim == 2):
+                raise ValueError("If both S and t are arrays they must be a meshgrid.")
+            rows, cols = S.shape
+            out = np.zeors_like(S)
+            for i in range(rows):
+                for j in range(cols):
+                    out[i,j] = self.__get_value(t[i,j],S[i,j],dt,ntrials)
+            return out 
