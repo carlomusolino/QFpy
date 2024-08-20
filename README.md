@@ -137,7 +137,7 @@ color_cycle = plt.rcParams['axes.prop_cycle'].by_key()['color']
 colors = color_cycle[:2]
 
 counts, bins = np.histogram(dP_MC, 100)
-ax.stairs(counts/1e04, bins, label="Full Black-Scholes")
+ax.stairs(counts/1e04, bins, label="Full MonteCarlo")
 
 # Identify the x values where x < threshold
 x_fill = bins[bins < -VaR_MC]
