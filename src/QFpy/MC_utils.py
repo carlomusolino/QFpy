@@ -52,9 +52,7 @@ def QuadraticPortfolioReturn(dt: float, sigma: np.ndarray, alpha: np.ndarray, be
     for i in range(N):
         dX[i] = sampler.get() * np.sqrt(sigma[i,i] * dt)
         
-    
-        
-    return theta * dt + np.sum(alpha*dX) + np.sum( dX * [ np.sum(dX * beta[:,i]) for i in range(N) ] )
+    return theta * dt + np.sum(alpha*dX) + np.dot(dX,np.dot(beta,dX))
     
     
     

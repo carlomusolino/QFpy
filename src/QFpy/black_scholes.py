@@ -3,21 +3,58 @@ import numpy as np
 from scipy.sparse import diags
 from typing import Callable
 
+def __divides_exactly(a, b, tol=1e-9):
+    if abs(a) < tol or abs(b) < tol:
+        return False  # Avoid division by very small numbers
+    
+    return abs(a % b) < tol 
+class EuropeanExercise:
+    def __init__(self):
+        pass 
+    def eval(self,V: np.ndarray, S: np.ndarray, t: float, payoff: Callable, args = []):
+        return V
+    def __repr__(self):
+        return "European style exercise."
+
+class AmericanExercise:
+    def __init__(self):
+        pass 
+    def eval(self,V: np.ndarray, S: np.ndarray, t: float, payoff: Callable, args = []):
+        return np.maximum(V, payoff(S,*args))
+    def __repr__(self):
+        return "American style exercise"
+    
+class BermudanExercise:
+    def __init__(self, period):
+        self.__period = period 
+         
+    def eval(self,V: np.ndarray, S: np.ndarray, t: float, payoff: Callable, args = []):
+        if __divides_exactly(t,self.__period):
+            return np.maximum(V, payoff(S,*args))
+        else:
+            return V
+    def __repr__(self):
+        return f"Bermudan style exercise with period {self.__period}"
+
 class BlackScholesFDSolver:
     
     def __init__(self,
-                 volatility: Callable,
-                 interest_rate: Callable,
+                 volatility: float,
+                 interest_rate: float,
                  payoff_function: Callable,
                  asymptotic_value: Callable,
                  underlying_range: np.ndarray,
                  time_range: np.ndarray, 
                  underlying_npoints: int = 1000,
-                 time_npoints: int = 100):
+                 time_npoints: int = 100,
+                 exercise: Callable = EuropeanExercise(),
+                 args = []):
         
         # Modelled asset 
         self.__payoff = payoff_function
         self.__bc     = asymptotic_value
+        self.__exercise = exercise 
+        self.__args = args 
         
         T0 = time_range[0]
         T1 = time_range[1]
@@ -45,8 +82,8 @@ class BlackScholesFDSolver:
         
         # S domain, add h and subtract -h
         # being careful not to have negative equities
-        self.__grid   = np.linspace(np.max(self.__Srange[0]-self.__h, 0)
-                                    self.__Srange[1]+self.__h,underlying_range+2)
+        self.__grid   = np.linspace(np.max(self.__Srange[0]-self.__h, 0),
+                                    self.__Srange[1]+self.__h,underlying_npoints+2)
         
         # T domain no need for gzs 
         self.__times  = np.linspace(self.__Trange[0],self.__Trange[1],time_npoints)
@@ -60,14 +97,17 @@ class BlackScholesFDSolver:
         self.__Gamma = np.zeros(self.__V.shape)
         self.__Theta = np.zeros(self.__V.shape)
         
+        # Risk free interest rate (potentially function of time)
+        self.__r = interest_rate
+        
+        # Volatility (potentially function of time and asset price)
+        self.__sigma = volatility
+        
         # BS evolution matrices
         self.__A,self.__B = self.__get_matrices()
         
-        # Risk free interest rate (potentially function of time)
-        self.__r = interest_rate(self.__times)
-        
-        # Volatility (potentially function of time and asset price)
-        self.__sigma = volatility(self.__times, self.__grid)
+        # Impose boundary and final conditions 
+        self.__initialize() 
         
         # Has this been solved
         self.__has_solution = False 
@@ -154,15 +194,15 @@ class BlackScholesFDSolver:
         
         return A,B
     
-    def initialize(self, *args):
+    def __initialize(self):
         
         # Set final condition
         for i,S in enumerate(self.__grid):
-            self.__V[i,-1] = self.__payoff(S,*args)
+            self.__V[i,-1] = self.__payoff(S,*self.__args)
 
         # Set boundaries at S = 0 and S = infty 
         for i,t in enumerate(self.__times):
-            boundaries = self.__bc(self.__Srange,t,*args)
+            boundaries = self.__bc(self.__Srange,t,*self.__args)
             self.__V[0,i] = boundaries[0]
             self.__V[-1,i] = boundaries[1]
     
@@ -178,7 +218,11 @@ class BlackScholesFDSolver:
         # Loop backwards in time
         for i in range(len(self.__times)-2, -1, -1):
             # Apply Crank-Nicholson method (implicit solve of linear PDE)
-            self.__V[1:-1,i] = np.linalg.solve(A, B @ V[:,i+1])[1:-1]
+            self.__V[1:-1,i] = self.__exercise.eval(np.linalg.solve(A, B @ V[:,i+1])[1:-1], 
+                                                    self.__grid[1:-1], 
+                                                    self.__times[i], 
+                                                    self.__payoff,
+                                                    self.__args)
         
         # Store the fact that we have the solution 
         self.__has_solution = True 
