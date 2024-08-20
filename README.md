@@ -1,4 +1,4 @@
-## QFpy v2
+## QFpy 
 QFpy is a Python package implementing common numerical tools used in quantitative finance to estimate the value of financial instruments and the associated risk.
 
 ## Installation
