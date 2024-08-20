@@ -6,59 +6,27 @@ from scipy.integrate import cumtrapz
 
 from QFpy.MC_utils import LogNormalStep
 from QFpy.typing_utils import is_scalar 
+from QFpy.options import Option, EuropeanCallOption, EuropeanPutOption, AmericanCallOption, AmericanPutOption, AsianCallOption, AsianPutOption
 
 def __divides_exactly(a, b, tol=1e-9):
     if abs(a) < tol or abs(b) < tol:
         return False  # Avoid division by very small numbers
     
     return abs(a % b) < tol 
-class EuropeanExercise:
-    def __init__(self):
-        pass 
-    def eval(self,V: np.ndarray, S: np.ndarray, t: float, payoff: Callable, args = []):
-        return V
-    def __repr__(self):
-        return "European style exercise."
-
-class AmericanExercise:
-    def __init__(self):
-        pass 
-    def eval(self,V: np.ndarray, S: np.ndarray, t: float, payoff: Callable, args = []):
-        return np.maximum(V, payoff(S,*args))
-    def __repr__(self):
-        return "American style exercise"
-    
-class BermudanExercise:
-    def __init__(self, period):
-        self.__period = period 
-         
-    def eval(self,V: np.ndarray, S: np.ndarray, t: float, payoff: Callable, args = []):
-        if __divides_exactly(t,self.__period):
-            return np.maximum(V, payoff(S,*args))
-        else:
-            return V
-    def __repr__(self):
-        return f"Bermudan style exercise with period {self.__period}"
 
 class BlackScholesFDSolver:
     
     def __init__(self,
-                 volatility: float,
-                 interest_rate: float,
-                 payoff_function: Callable,
-                 asymptotic_value: Callable,
+                 volatility: Callable,
+                 interest_rate: Callable,
+                 option: Option,
                  underlying_range: np.ndarray,
                  time_range: np.ndarray, 
                  underlying_npoints: int = 1000,
-                 time_npoints: int = 100,
-                 exercise: Callable = EuropeanExercise(),
-                 args = []):
+                 time_npoints: int = 100):
         
         # Modelled asset 
-        self.__payoff = payoff_function
-        self.__bc     = asymptotic_value
-        self.__exercise = exercise 
-        self.__args = args 
+        self.__option = option
         
         T0 = time_range[0]
         T1 = time_range[1]
@@ -107,9 +75,6 @@ class BlackScholesFDSolver:
         # Volatility (potentially function of time and asset price)
         self.__sigma = volatility
         
-        # BS evolution matrices
-        self.__A,self.__B = self.__get_matrices()
-        
         # Impose boundary and final conditions 
         self.__initialize() 
         
@@ -157,7 +122,7 @@ class BlackScholesFDSolver:
         dt = self.__dt
         return (np.diff(V,axis=1) / dt)
         
-    def __get_matrices(self):
+    def __get_matrices(self, t):
         """Get matrices for Crank-Nicholson solver.
 
         Returns:
@@ -165,14 +130,14 @@ class BlackScholesFDSolver:
                         order derivative operators appearing 
                         on the RHS of the Black-Scholes equation.
         """
-        dt = self.__dt
-        sigma = self.__sigma
-        r = self.__r
-        N = len(self.__grid)
+        dt    = self.__dt
+        sigma = self.__sigma(self.__grid, t)
+        r     = self.__r(t)
+        N     = len(self.__grid)
         
         # Coefficients
         alpha = 0.25 * dt * (sigma**2 * (np.arange(N)**2) - r * np.arange(N))
-        beta = -0.5 * dt * (sigma**2 * (np.arange(N)**2) + r)
+        beta  = -0.5 * dt * (sigma**2 * (np.arange(N)**2) + r)
         gamma = 0.25 * dt * (sigma**2 * (np.arange(N)**2) + r * np.arange(N))
 
         # Matrix setup for implicit scheme
@@ -183,31 +148,30 @@ class BlackScholesFDSolver:
         # a frame of width 1 for BCs 
         for i in range(1, N-1):
             A[i, i-1] = -alpha[i]
-            A[i, i] = 1 - beta[i]
+            A[i, i]   = 1 - beta[i]
             A[i, i+1] = -gamma[i]
 
             B[i, i-1] = alpha[i]
-            B[i, i] = 1 + beta[i]
+            B[i, i]   = 1 + beta[i]
             B[i, i+1] = gamma[i]
 
         # Set BCs (untouched)
-        A[0, 0] = 1
+        A[0, 0]     = 1
         A[N-1, N-1] = 1
-        B[0, 0] = 1
+        B[0, 0]     = 1
         B[N-1, N-1] = 1
         
         return A,B
     
     def __initialize(self):
-        
         # Set final condition
         for i,S in enumerate(self.__grid):
-            self.__V[i,-1] = self.__payoff(S,*self.__args)
+            self.__V[i,-1] = self.__option.payoff(S,False)
 
         # Set boundaries at S = 0 and S = infty 
         for i,t in enumerate(self.__times):
-            boundaries = self.__bc(self.__Srange,t,*self.__args)
-            self.__V[0,i] = boundaries[0]
+            boundaries = self.__option.asymptotic_value(self.__Srange,t,self.__r)
+            self.__V[0,i]  = boundaries[0]
             self.__V[-1,i] = boundaries[1]
     
     def __solve(self):
@@ -216,17 +180,15 @@ class BlackScholesFDSolver:
         
         # Read in vars 
         V = self.__V
-        A = self.__A 
-        B = self.__B 
-        
+
         # Loop backwards in time
         for i in range(len(self.__times)-2, -1, -1):
+            # Get the matrices 
+            A,B = self.__get_matrices(self.__times[i])
             # Apply Crank-Nicholson method (implicit solve of linear PDE)
-            self.__V[1:-1,i] = self.__exercise.eval(np.linalg.solve(A, B @ V[:,i+1])[1:-1], 
-                                                    self.__grid[1:-1], 
-                                                    self.__times[i], 
-                                                    self.__payoff,
-                                                    self.__args)
+            self.__V[1:-1,i] = self.__option.exercise(np.linalg.solve(A, B @ V[:,i+1])[1:-1], 
+                                                          self.__grid[1:-1], 
+                                                          self.__times[i])
         
         # Store the fact that we have the solution 
         self.__has_solution = True 
@@ -295,37 +257,33 @@ class BlackScholesFDSolver:
     
     def __repr__(self):
         return "Black-Scholes FD solver:\n"+\
+              f"   option                          = {self.__option}\n"+\
+              f"   underlying vol                  = {self.__sigma}\n"+\
+              f"   risk-free interest rate         = {self.__r}\n"+\
               f"   time range                      = [{self.__Trange[0]}, {self.__Trange[1]}]\n"+\
               f"   asset price range               = [{self.__Srange[0]}, {self.__Srange[1]}]\n"+\
               f"   number of points in time        = {len(self.__times)}\n"+\
               f"   number of points in asset price = {len(self.__grid)}\n"+\
               f"   time axis spacing               = {self.__dt}\n"+\
               f"   asset price axis spacing        = {self.__h}\n"
-              
-
-def NoPathDependence():
-    pass 
 
 class BlackScholesMCSolver:
     
     def __init__(self,
                  volatility: Callable,
                  interest_rate: Callable,
-                 payoff: Callable,
-                 expiry: float,
+                 option: Option,
                  n_underlying: int = 1,
-                 rho: np.ndarray = np.array([1]),
-                 args = []):
+                 rho: np.ndarray = np.array([1])):
         self.__vol = volatility 
         self.__r   = interest_rate 
         
-        self.__payoff = payoff 
+        self.__option = option 
 
         self.__n_underlying = n_underlying 
         
-        self.__T = expiry 
+        self.__T = self.__option.T 
         
-        self.__args = args 
         
     def __shoot_single_asset(self, t, T, dt, S0):
         N = int((T-t)/dt)
@@ -354,7 +312,7 @@ class BlackScholesMCSolver:
         rng = np.random.default_rng()
         for i in range(1,N):
             _t += dt 
-            vol = self.__vol(S[i-1], _t)
+            vol = np.array([self.__vol[j](S[i-1], _t) for j in range(self.__n_underlying)])
             r   = self.__r(_t)
             dX = rng.multivariate_normal(0, self.__rho, size=self.__n_underlying)
             S.append(S[i-1] * np.exp( (r - 0.5*vol**2) * dt + vol * dX * np.sqrt(dt) ) )
@@ -370,13 +328,13 @@ class BlackScholesMCSolver:
         Vlist = [] 
         for i in range(ntrials):
             Shist, rhist, volhist, times = self.__shoot_single_asset(t,self.__T,dt,S)
-            Vlist.append( self.__discount(self.__payoff(Shist,
-                                                  rhist,
-                                                  volhist,
-                                                  times,
-                                                  *self.__args), 
-                                    rhist, 
-                                    times) )
+            Vlist.append( self.__discount(self.__option.payoff(Shist, 
+                                                                   True,
+                                                                   rhist,
+                                                                   volhist,
+                                                                   times), 
+                                          rhist, 
+                                          times) )
         return (np.mean(np.array(Vlist)), np.std(np.array(Vlist),ddof=1) )
 
     def __get_value_multiple_assets(self,
@@ -387,13 +345,13 @@ class BlackScholesMCSolver:
         Vlist = []
         for i in range(ntrials):
             Shist, rhist, volhist, times = self.__shoot_multiple_assets(t,self.__T,dt,S)
-            Vlist.append(self.__payoff(Shist, 
-                                       rhist, 
-                                       volhist, 
-                                       times, 
-                                       *self.__args), 
-                        rhist, 
-                        times)
+            Vlist.append(self.__option.payoff(Shist,
+                                                  True, 
+                                                  rhist, 
+                                                  volhist, 
+                                                  times), 
+                         rhist, 
+                         times)
         return (np.mean(np.array(Vlist)), np.std(np.array(Vlist),ddof=1) ) 
     
     def __get_value(self,t,S,dt,ntrials):
@@ -438,3 +396,10 @@ class BlackScholesMCSolver:
                     mean[i,j] = mu 
                     stddev[i,j] = sigma
             return mean,stddev
+    
+    def __repr__(self):
+        return "Black-Scholes MC solver:\n"+\
+              f"   option                      = {self.__option}\n"+\
+              f"   underlying vol              = {self.__vol}\n"+\
+              f"   risk-free interest rate     = {self.__r}\n"+\
+              f"   number of underlying assets = {self.__n_underlying}"
