@@ -2,7 +2,7 @@ from scipy.interpolate import RegularGridInterpolator
 import numpy as np
 from scipy.sparse import diags
 from typing import Callable
-from scipy.integrate import cumtrapz 
+from scipy.integrate import trapz 
 
 from QFpy.MC_utils import LogNormalStep
 from QFpy.typing_utils import is_scalar 
@@ -285,23 +285,37 @@ class BlackScholesMCSolver:
         self.__T = self.__option.T 
         
         
-    def __shoot_single_asset(self, t, T, dt, S0):
+    def __shoot_single_asset(self, t, T, dt, ntrials, S0):
         N = int((T-t)/dt)
-        S = [S0]
-        _t = t 
-        _rates = [self.__r(t)]
-        _vols = [self.__vol(S0,t)]
-        _times = [t]
+        
+        eps_p = np.random.standard_normal(size=[N,ntrials])
+        eps_m = - eps_p 
+        Sp = np.zeros_like(eps_p)
+        Sm = np.zeros_like(eps_p)
+        
+        Sp[0,:] = S0 
+        Sm[0,:] = S0 
+        
+        _times = np.linspace(t,T,N)
+        _rates = self.__r(_times)
+        
+        _vols_p = np.zeros_like(eps_p)
+        _vols_m = np.zeros_like(eps_p)
+        
+        _vols_p[0,:] = self.__vol(S0,t)
+        _vols_m[0,:] = self.__vol(S0,t)
+        
         for i in range(1,N):
-            _t += dt 
-            vol = self.__vol(S[i-1], _t)
-            r   = self.__r(_t)
-            S.append(LogNormalStep(S[i-1],dt,vol,r))
-            _rates.append(r)
-            _times.append(_t)
-            _vols.append(vol)
-        return (S,_rates,_vols,_times)
-    
+            r = _rates[i]
+            vol_p = _vols_p[i-1,:]
+            vol_m = _vols_m[i-1,:]
+            Sp[i,:] = Sp[i-1,:] * np.exp( ( r - 0.5 * vol_p**2 ) * dt  + vol_p * eps_p[i,:] * np.sqrt(dt))
+            Sm[i,:] = Sm[i-1,:] * np.exp( ( r - 0.5 * vol_m**2 ) * dt  + vol_m * eps_m[i,:] * np.sqrt(dt))
+            _vols_p[i,:] = self.__vol(Sp[i,:], _times[i])
+            _vols_m[i,:] = self.__vol(Sm[i,:], _times[i])
+
+        return (Sp, Sm, _vols_p, _vols_m, _rates, _times)
+    '''
     def __shoot_multiple_assets(self, t, T, dt, S0):
         N = int((T-t)/dt)
         S = [S0]
@@ -320,23 +334,17 @@ class BlackScholesMCSolver:
             _times.append(_t)
             _vols.append(vol)
         return (S,_rates,_vols,_times)
-
+    '''
     def __discount(self, S, r, t):
-        return S * np.exp(-cumtrapz(r,t))
+        return S * np.exp(-trapz(r,t))
     
     def __get_value_single_asset(self, t: float, S: float, dt: float, ntrials: int):
-        Vlist = [] 
-        for i in range(ntrials):
-            Shist, rhist, volhist, times = self.__shoot_single_asset(t,self.__T,dt,S)
-            Vlist.append( self.__discount(self.__option.payoff(Shist, 
-                                                                   True,
-                                                                   rhist,
-                                                                   volhist,
-                                                                   times), 
-                                          rhist, 
-                                          times) )
-        return (np.mean(np.array(Vlist)), np.std(np.array(Vlist),ddof=1) )
-
+        Sp,Sm, vp,vm , r,times = self.__shoot_single_asset(t,self.__T,dt,ntrials, S)
+        Vp = self.__option.payoff(Sp, True, r, vp, times)
+        Vm = self.__option.payoff(Sm, True, r, vm, times)
+        V = self.__discount(0.5 * (Vp + Vm), r, times)
+        return (np.mean(V), np.std(V,ddof=1) )
+    '''    
     def __get_value_multiple_assets(self,
                                     t: float,
                                     S: np.ndarray,
@@ -353,12 +361,13 @@ class BlackScholesMCSolver:
                          rhist, 
                          times)
         return (np.mean(np.array(Vlist)), np.std(np.array(Vlist),ddof=1) ) 
-    
+    '''
     def __get_value(self,t,S,dt,ntrials):
         if self.__n_underlying == 1:
             return self.__get_value_single_asset(t,S,dt,ntrials)
         else:
-            return self.__get_value_multiple_assets(t,S,ntrials)
+            raise NotImplementedError()
+            #return self.__get_value_multiple_assets(t,S,ntrials)
     
     def get_value(self, t: np.ndarray, S: np.ndarray, dt: float, ntrials: int ): 
         if is_scalar(t) and is_scalar(S):
@@ -395,6 +404,114 @@ class BlackScholesMCSolver:
                     mu,sigma = self.__get_value(t[i,j],S[i,j],dt,ntrials)
                     mean[i,j] = mu 
                     stddev[i,j] = sigma
+            return mean,stddev
+        
+    def get_delta(self, t: np.ndarray,
+                  S: np.ndarray,
+                  dt:float,
+                  ntrials: int,
+                  eps: float = 5e-03):
+        if is_scalar(S):
+            dS = eps * S 
+        else:
+            dS = eps * np.maximum(S)
+
+        if is_scalar(t) and is_scalar(S):
+            V1 = self.__get_value(t,S+dS,dt,ntrials)
+            V2 = self.__get_value(t,S-dS,dt,ntrials)
+            return ((V1[0]-V2[0])/(2*dS),np.sqrt((V1[1]**2+V2[1]**2))/(2*dS))
+        elif not is_scalar(t) and is_scalar(S):
+            if t.ndim > 1:
+                raise ValueError("If S is scalar t must be rank 1.")
+            mean   = np.zeros(len(t))
+            stddev = np.zeros(len(t))
+            for i,tt in enumerate(t):
+                mu1,sigma1  = self.__get_value(tt,S+dS,dt,ntrials)
+                mu2,sigma2  = self.__get_value(tt,S-dS,dt,ntrials)
+                mean[i]   = (mu1-mu2)/(2*dS) 
+                stddev[i] = np.sqrt((sigma1**2+sigma2**2))/(2*dS)
+            return mean,stddev  
+            
+        elif not is_scalar(S) and is_scalar(t):
+            if S.ndim > 1:
+                raise ValueError("If t is scalar S must be rank 1.")
+            mean   = np.zeros(len(S))
+            stddev = np.zeros(len(S))
+            for i,s in enumerate(S):
+                mu1,sigma1  = self.__get_value(t,s+dS,dt,ntrials)
+                mu2,sigma2  = self.__get_value(t,s-dS,dt,ntrials)
+                mean[i]   = (mu1-mu2)/(2*dS) 
+                stddev[i] = np.sqrt((sigma1**2+sigma2**2))/(2*dS)
+            return mean,stddev    
+        else:
+            if ( not S.ndim == 2 ) or ( not t.ndim == 2):
+                raise ValueError("If both S and t are arrays they must be a meshgrid.")
+            rows, cols = S.shape
+            mean   = np.zeros_like(S,dtype=float)
+            stddev = np.zeros_like(S,dtype=float)
+            for i in range(rows):
+                for j in range(cols):
+                    mu1,sigma1  = self.__get_value(t[i,j],S[i,j]+dS,dt,ntrials)
+                    mu2,sigma2  = self.__get_value(t[i,j],S[i,j]-dS,dt,ntrials)
+                    mean[i]   = (mu1-mu2)/(2*dS) 
+                    stddev[i] = np.sqrt((sigma1**2+sigma2**2))/(2*dS)
+            return mean,stddev
+    
+    def get_gamma(self, t: np.ndarray,
+                  S: np.ndarray,
+                  dt:float,
+                  ntrials: int,
+                  eps: float = 5e-03):
+        if is_scalar(S):
+            dS = eps * S 
+        else:
+            dS = eps * np.maximum(S)
+
+        if is_scalar(t) and is_scalar(S):
+            fp = self.__get_value(t,S+dS,dt,ntrials)
+            fc = self.__get_value(t,S,dt,ntrials)
+            fm = self.__get_value(t,S-dS,dt,ntrials)
+            return ((fm[0]-2*fc[0]+fp[0])/(dS**2),
+                    np.sqrt(fm[1]**2+4*fc[1]**2+fp[1]**2)/(dS**2))
+
+        elif not is_scalar(t) and is_scalar(S):
+            if t.ndim > 1:
+                raise ValueError("If S is scalar t must be rank 1.")
+            mean   = np.zeros(len(t))
+            stddev = np.zeros(len(t))
+            for i,tt in enumerate(t):
+                fp  = self.__get_value(tt,S+dS,dt,ntrials)
+                fm  = self.__get_value(tt,S-dS,dt,ntrials)
+                fc  = self.__get_value(tt,S,dt,ntrials)
+                mean[i]   = (fm[0]-2*fc[0]+fp[0])/(dS**2)
+                stddev[i] = np.sqrt(fm[1]**2+4*fc[1]**2+fp[1]**2)/(dS**2)
+            return mean,stddev  
+            
+        elif not is_scalar(S) and is_scalar(t):
+            if S.ndim > 1:
+                raise ValueError("If t is scalar S must be rank 1.")
+            mean   = np.zeros(len(S))
+            stddev = np.zeros(len(S))
+            for i,s in enumerate(S):
+                fp  = self.__get_value(t,s+dS,dt,ntrials)
+                fm  = self.__get_value(t,s-dS,dt,ntrials)
+                fc  = self.__get_value(t,s,dt,ntrials)
+                mean[i]   = (fm[0]-2*fc[0]+fp[0])/(dS**2)
+                stddev[i] = np.sqrt(fm[1]**2+4*fc[1]**2+fp[1]**2)/(dS**2)
+            return mean,stddev    
+        else:
+            if ( not S.ndim == 2 ) or ( not t.ndim == 2):
+                raise ValueError("If both S and t are arrays they must be a meshgrid.")
+            rows, cols = S.shape
+            mean   = np.zeros_like(S,dtype=float)
+            stddev = np.zeros_like(S,dtype=float)
+            for i in range(rows):
+                for j in range(cols):
+                    fp  = self.__get_value(t[i,j],S[i,j]+dS,dt,ntrials)
+                    fm  = self.__get_value(t[i,j],S[i,j]-dS,dt,ntrials)
+                    fc  = self.__get_value(t[i,j],S[i,j],dt,ntrials)
+                    mean[i,j]   = (fm[0]-2*fc[0]+fp[0])/(dS**2)
+                    stddev[i,j] = np.sqrt(fm[1]**2+4*fc[1]**2+fp[1]**2)/(dS**2)
             return mean,stddev
     
     def __repr__(self):
